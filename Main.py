@@ -1773,23 +1773,33 @@ async def process_account_uid_pass(uid: str, password: str) -> Optional[Dict]:
     try:
         verconfig_res = await version_config()
         if verconfig_res is None:
+            print_error("[DEBUG FAIL] version_config() mengembalikan None (gagal ambil versi)")
             return None
         release_version, client_version, server_url = verconfig_res
         
         tokengrant_response = await get_access_token(uid, password)
         if tokengrant_response is None:
+            print_error(f"[DEBUG FAIL] get_access_token() gagal untuk UID {uid} (UID/Password salah atau limit)")
             return None
         open_id, access_token, platform = tokengrant_response
+        print_info(f"[DEBUG GUEST LOGIN] open_id: {open_id}, platform: {platform}")
         
-        # 🔥 1ta id 1ta Device Injection
+        # Device Injection
         device_info = get_device_for_account(uid)
         
         login_payload_data = await build_majorlogin_payload(open_id, access_token, platform, client_version, device_info)
+        if not login_payload_data:
+            print_error("[DEBUG FAIL] build_majorlogin_payload() gagal membuat payload")
+            return None
+
         majorlogin_response = await send_majorlogin(login_payload_data, release_version, server_url)
         if majorlogin_response is None:
+            print_error("[DEBUG FAIL] send_majorlogin() gagal atau response tidak valid")
             return None
+
         getlogin_result = await send_getlogin(login_payload_data, majorlogin_response.url, majorlogin_response.token, release_version)
         if getlogin_result is None:
+            print_error("[DEBUG FAIL] send_getlogin() gagal mendapatkan data akun")
             return None
         res_proto, dict_res = getlogin_result
 
@@ -1828,11 +1838,11 @@ async def process_account_uid_pass(uid: str, password: str) -> Optional[Dict]:
         }
         _register_credentials(account_data)
         cache_set(uid, account_data)
+        print_success(f"[LOGIN SUCCESS] UID {uid} berhasil login sebagai {nickname} (ID: {acc_id})")
         return account_data
     except Exception as e:
-        print_error(f"process_account_uid_pass error: {e}")
+        print_error(f"[DEBUG EXCEPTION] process_account_uid_pass error: {e}")
         return None
-
 
 async def process_account_token(access_token: str) -> Optional[Dict]:
     cache_key = f"tok_{access_token[:20]}"
@@ -1855,6 +1865,7 @@ async def process_account_token(access_token: str) -> Optional[Dict]:
     try:
         verconfig_res = await version_config()
         if verconfig_res is None:
+            print_error("[DEBUG FAIL] version_config() mengembalikan None")
             return None
         release_version, client_version, server_url = verconfig_res
 
@@ -1868,26 +1879,41 @@ async def process_account_token(access_token: str) -> Optional[Dict]:
             "User-Agent": "GarenaMSDK/4.0.19P4(G011A ;Android 9;en;US;)"
         }
         resp = await asyncio.to_thread(requests.get, url, headers=hdrs, timeout=10)
+        
+        # Log response status
+        from urllib.parse import urlparse
+        path_name = urlparse(url).path
+        status_text = "OK" if resp.ok else "FAIL"
+        print_colored(
+            f"\n[HTTP DEBUG] {path_name} {status_text} {resp.status_code}\n"
+            f"Reason: {resp.reason} ({url})",
+            Colors.GREEN if resp.ok else Colors.FAIL
+        )
+
         data = resp.json()
+        print_info(f"[DEBUG TOKEN BODY] {data}")
 
         if 'error' in data:
+            print_error(f"[DEBUG FAIL] Token inspect error: {data.get('error')}")
             return None
 
         open_id = data.get('open_id')
         platform = data.get('platform', 4)
 
         if not open_id:
+            print_error("[DEBUG FAIL] Parameter 'open_id' tidak ada di dalam respons JSON")
             return None
 
-        # 🔥 1ta id 1ta Device Injection (using unique open_id as the key)
         device_info = get_device_for_account(open_id)
 
         login_payload_data = await build_majorlogin_payload(open_id, access_token, str(platform), client_version, device_info)
         if not login_payload_data:
+            print_error("[DEBUG FAIL] build_majorlogin_payload() gagal (kemungkinan protobuf error)")
             return None
 
         majorlogin_response = await send_majorlogin(login_payload_data, release_version, server_url)
         if majorlogin_response is None:
+            print_error("[DEBUG FAIL] send_majorlogin() gagal atau respons tidak dapat di-parse")
             return None
 
         getlogin_result = await send_getlogin(
@@ -1897,6 +1923,7 @@ async def process_account_token(access_token: str) -> Optional[Dict]:
             release_version
         )
         if getlogin_result is None:
+            print_error("[DEBUG FAIL] send_getlogin() gagal mendapatkan login data")
             return None
 
         res_proto, dict_res = getlogin_result
@@ -1937,9 +1964,8 @@ async def process_account_token(access_token: str) -> Optional[Dict]:
         cache_set(cache_key, account_data)
         return account_data
     except Exception as e:
-        print_error(f"process_account_token error: {e}")
+        print_error(f"[DEBUG EXCEPTION] process_account_token error: {e}")
         return None
-
 
 async def run_account_worker(account_data: Dict, label: str):
     acc_id = str(account_data['account_id'])
