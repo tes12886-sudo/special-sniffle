@@ -1,0 +1,100 @@
+name: PC RDP Tailscale Pure (@alves7.pcm)
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_number:
+        description: 'Instance Number (1-10)'
+        required: false
+        default: '1'
+        type: string
+
+env:
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY || secrets.TAILSCALE_AUTHKEY || vars.TAILSCALE_AUTH_KEY || vars.TAILSCALE_AUTHKEY }}
+
+jobs:
+  deploy-rdp-tailscale:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: System Information
+        shell: pwsh
+        run: |
+          Write-Host '=== RDP VIA TAILSCALE (PURE) ===' -ForegroundColor Green
+          Write-Host "Instance Number: ${{ github.event.inputs.instance_number || '1' }}" -ForegroundColor Yellow
+          Write-Host "Runner: $env:RUNNER_NAME" -ForegroundColor Yellow
+          Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, TotalPhysicalMemory
+
+      - name: Enable RDP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+
+      - name: Create User Account
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $password = ConvertTo-SecureString 'P@ssw0rd!' -AsPlainText -Force
+          Set-LocalUser -Name runneradmin -Password $password
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member runneradmin -ErrorAction SilentlyContinue
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installerPath = Join-Path $env:TEMP 'tailscale.msi'
+          Invoke-WebRequest -Uri 'https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi' -OutFile $installerPath -TimeoutSec 60
+          $install = Start-Process msiexec.exe -ArgumentList @('/i', $installerPath, '/quiet', '/norestart') -PassThru
+          if (-not $install.WaitForExit(120000)) {
+            Stop-Process -Id $install.Id -Force -ErrorAction SilentlyContinue
+            throw 'A instalação do Tailscale excedeu 120 segundos.'
+          }
+          if ($install.ExitCode -notin @(0, 3010)) {
+            throw "A instalação do Tailscale falhou com código $($install.ExitCode)."
+          }
+          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+
+      - name: Connect Tailscale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            throw 'Configure o segredo TAILSCALE_AUTH_KEY no repositório.'
+          }
+          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
+          if (-not (Test-Path $tailscale)) {
+            throw 'tailscale.exe não foi encontrado após a instalação.'
+          }
+          & $tailscale up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="rdp-pc-${{ github.run_id }}" --accept-routes=false
+          if ($LASTEXITCODE -ne 0) { throw "tailscale up falhou com código $LASTEXITCODE." }
+          Start-Sleep -Seconds 10
+          $tsIp = ((& $tailscale ip -4) | Select-Object -First 1).ToString().Trim()
+          if ($tsIp -notmatch '^100\.') { throw "IP Tailscale inválido ou ausente: $tsIp" }
+          
+          Write-Host "====================================================" -ForegroundColor Cyan
+          Write-Host " RDP PRONTO! " -ForegroundColor Green
+          Write-Host " IP Tailscale : $tsIp" -ForegroundColor Yellow
+          Write-Host " Username     : runneradmin" -ForegroundColor Yellow
+          Write-Host " Password     : P@ssw0rd!" -ForegroundColor Yellow
+          Write-Host "====================================================" -ForegroundColor Cyan
+
+      - name: Keep Session Alive
+        shell: pwsh
+        run: |
+          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
+          $count = 0
+          while ($true) {
+            $count++
+            $state = (& $tailscale status 2>$null | Out-String)
+            Write-Host "Sessão ativa #$count - $(Get-Date)" -ForegroundColor Green
+            if ($state -notmatch '100\.') { Write-Host 'Tailscale não está conectado.' -ForegroundColor Red }
+            Start-Sleep -Seconds 60
+          }
+          
